@@ -1,93 +1,153 @@
-import tensorflow as tf
-from keras.callbacks import ModelCheckpoint
-from keras.layers import Conv2D, MaxPooling2D, Dropout, Dense, Flatten
-from keras.utils.vis_utils import plot_model
-from tensorflow.keras.applications.resnet50 import ResNet50
-from tensorflow.keras.preprocessing import image
-from tensorflow.keras.applications.resnet50 import preprocess_input, decode_predictions
+import torch
+from torch.utils.data import DataLoader, Dataset
+import torchvision
+import torchvision.transforms as transforms
+import torch
+import torchaudio
+import torch.nn as nn
+import torch.nn.functional as F
+from torchvision.utils import make_grid
+from torchvision.utils import save_image
+from IPython.display import Image
+import torch.optim as optim
 import numpy as np
+import random
+import io
 
-from keras import models
-from tensorflow import keras
-from tensorflow.keras.layers import LeakyReLU, Softmax
-from tensorflow.keras.layers import BatchNormalization
-from tensorflow.keras.layers import LSTM
+batch_size = 4
 
+trainset = torchaudio.datasets.YESNO(
+   root='C:/AdvResearch/CRC-VAL-HE-7K/ADI',
+   folder_in_archive='waves_yesno',
+   download=True)
+trainloader = torch.utils.data.DataLoader(trainset, batch_size=batch_size,
+                                         shuffle=True, num_workers=2)
 
+testset = torchaudio.datasets.YESNO(
+   root='C:/AdvResearch/CRC-VAL-HE-7K/MUC',
+   folder_in_archive='waves_yesno',
+   download=True)
+testloader = torch.utils.data.DataLoader(trainset, batch_size=batch_size,
+                                         shuffle=True, num_workers=2)
 
+classes = 'ADI'
 
-batch_size = 32
-img_height = 512
-img_width = 512
-data_dir = "/Users/ryankersten/Desktop/Data/"
+class Net(nn.Module):
+   def __init__(self):
+       super().__init__()
+       self.conv1 = nn.Conv2d(3, 6, 5)
+       self.pool = nn.MaxPool2d(2, 2)
+       self.conv2 = nn.Conv2d(6, 16, 5)
+       self.fc1 = nn.Linear(16 * 5 * 5, 120)
+       self.fc2 = nn.Linear(120, 84)
+       self.fc3 = nn.Linear(84, 10)
 
-
-
-train_ds = tf.keras.preprocessing.image_dataset_from_directory(
-    data_dir,
-    validation_split=.2,
-    seed=123,
-    image_size=(img_height, img_width),
-    subset="training",
-    batch_size=batch_size)
-
-checkpointer = ModelCheckpoint(
-    filepath='./output/checkpoints/inception.{epoch:03d}-{val_loss:.2f}.hdf5',
-    verbose=1,
-    save_best_only=True)
-
-
-class_names = train_ds.class_names
-print(class_names)
-for image_batch, labels_batch in train_ds:
-    print(image_batch.shape)
-    print(labels_batch.shape)
-    break
-
-AUTOTUNE = tf.data.AUTOTUNE
-
-train_ds = train_ds.cache().shuffle(1000).prefetch(buffer_size=AUTOTUNE)
-num_classes = 3
+   def forward(self, x):
+       x = self.pool(F.relu(self.conv1(x)))
+       x = self.pool(F.relu(self.conv2(x)))
+       x = torch.flatten(x, 1)  # flatten all dimensions except batch
+       x = F.relu(self.fc1(x))
+       x = F.relu(self.fc2(x))
+       x = self.fc3(x)
+       return x
 
 
-model = models.Sequential(name="test_model")
+net = Net()
 
-model.add(Conv2D(name='Conv1', filters=16, kernel_size=(2,2), activation='relu', input_shape= (512,512,3)))
+criterion = nn.CrossEntropyLoss()
+optimizer = optim.SGD(net.parameters(), lr=0.001, momentum=0.9)
 
-model.add(MaxPooling2D(name='Conv12',pool_size=(4,4), strides=(2,2)))
+for epoch in range(2):  # loop over the dataset multiple times
 
-model.add(Conv2D(name='Conv13',filters=16, kernel_size=(4,4), activation='relu'))
+   running_loss = 0.0
+   for i, data in enumerate(trainloader, 0):
+       # get the inputs; data is a list of [inputs, labels]
+       inputs, labels = data
 
-model.add(MaxPooling2D(name='Conv14',pool_size=(4,4), strides=(2,2)))
+       # zero the parameter gradients
+       optimizer.zero_grad()
 
-model.add(Conv2D(name='Conv15',filters=16, kernel_size=(4,4), activation='relu' ))
+       # forward + backward + optimize
+       outputs = net(inputs)
+       loss = criterion(outputs, labels)
+       loss.backward()
+       optimizer.step()
+
+       # print statistics
+       running_loss += loss.item()
+       if i % 2000 == 1999:  # print every 2000 mini-batches
+           print('[%d, %5d] loss: %.3f' %
+                 (epoch + 1, i + 1, running_loss / 2000))
+           running_loss = 0.0
+
+print('Finished Training')
+
+PATH = './cifar_net.pth'
+torch.save(net.state_dict(), PATH)
+
+dataiter = iter(testloader)
+images, labels = dataiter.next()
+
+# print images
+plt.imshow(torchvision.utils.make_grid(images))
+print('GroundTruth: ', ' '.join('%5s' % classes[labels[j]] for j in range(4)))
+
+net = Net()
+net.load_state_dict(torch.load(PATH))
+
+outputs = net(images)
+
+_, predicted = torch.max(outputs, 1)
+
+print('Predicted: ', ' '.join('%5s' % classes[predicted[j]]
+                             for j in range(4)))
+
+correct = 0
+total = 0
+# since we're not training, we don't need to calculate the gradients for our outputs
+with torch.no_grad():
+   for data in testloader:
+       images, labels = data
+       # calculate outputs by running images through the network
+       outputs = net(images)
+       # the class with the highest energy is what we choose as prediction
+       _, predicted = torch.max(outputs.data, 1)
+       total += labels.size(0)
+       correct += (predicted == labels).sum().item()
+
+print('Accuracy of the network on the 10000 test images: %d %%' % (
+       100 * correct / total))
+
+# prepare to count predictions for each class
+correct_pred = {classname: 0 for classname in classes}
+total_pred = {classname: 0 for classname in classes}
+
+# again no gradients needed
+with torch.no_grad():
+   for data in testloader:
+       images, labels = data
+       outputs = net(images)
+       _, predictions = torch.max(outputs, 1)
+       # collect the correct predictions for each class
+       for label, prediction in zip(labels, predictions):
+           if label == prediction:
+               correct_pred[classes[label]] += 1
+           total_pred[classes[label]] += 1
+
+# print accuracy for each class
+for classname, correct_count in correct_pred.items():
+   accuracy = 100 * float(correct_count) / total_pred[classname]
+   print("Accuracy for class {:5s} is: {:.1f} %".format(classname,
+                                                        accuracy))
+
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+
+# Assuming that we are on a CUDA machine, this should print a CUDA device:
+
+print(device)
+
+net.to(device)
+
+inputs, labels = data[0].to(device), data[1].to(device)
 
 
-
-model.add(MaxPooling2D(name='Conv16',pool_size=(4,4), strides=(2,2)))
-
-model.add(Conv2D(name='Conv18',filters=16, kernel_size=(4,4), activation='relu' ))
-
-model.add(MaxPooling2D(name='Conv19',pool_size=(4,4), strides=(2,2)))
- 
-model.add(Conv2D(name='Conv11',filters=16, kernel_size=(4,4), activation='relu' ))
-
-model.add(MaxPooling2D(name='Conv21',pool_size=(4,4), strides=(2,2)))
-
-model.add(Flatten())
-model.add(Dropout(.2))
-model.add(Dense(16, activation='relu'))
-
-model.add(Dense(1, activation
-='softmax'))
-
-model.build(input_shape=(None,512,512,3))
-model.compile(
-    loss="categorical_crossentropy", optimizer="Adadelta", metrics=[tf.keras.metrics.Accuracy()])
-print(model.summary())
-
-epochs = 40
-history = model.fit(
-    train_ds,
-    epochs=epochs
-)
